@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+reading_memory.json
+pointer_map.json
+*.log
