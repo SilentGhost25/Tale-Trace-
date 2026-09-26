@@ -43,6 +43,20 @@ def preprocess_image(frame: np.ndarray) -> np.ndarray:
     return sharpened
 
 
+def find_logitech_device_index() -> Optional[int]:
+    """Finds the device index corresponding specifically to the Logitech webcam."""
+    try:
+        from pygrabber.dshow_graph import FilterGraph
+        devices = FilterGraph().get_input_devices()
+        for idx, name in enumerate(devices):
+            if any(term in name.lower() for term in ["logi", "c270", "logitech"]):
+                log.info("Auto-detected Logitech webcam: '%s' at index %d", name, idx)
+                return idx
+    except Exception as e:
+        log.debug("Device enumeration fallback: %s", e)
+    return None
+
+
 class WebcamStream:
     def __init__(
         self,
@@ -51,7 +65,14 @@ class WebcamStream:
         height: Optional[int] = None,
         fps_limit: float = 15.0,
     ):
-        self.device_index = device_index if device_index is not None else settings.webcam_device_index
+        detected_idx = find_logitech_device_index()
+        if device_index is not None:
+            self.device_index = device_index
+        elif detected_idx is not None:
+            self.device_index = detected_idx
+        else:
+            self.device_index = settings.webcam_device_index
+
         self.width = width if width is not None else settings.webcam_width
         self.height = height if height is not None else settings.webcam_height
         self.fps_limit = fps_limit
@@ -65,22 +86,48 @@ class WebcamStream:
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        # On Windows, DirectShow provides faster initialization and proper resolution control
-        backend = cv2.CAP_DSHOW if hasattr(cv2, "CAP_DSHOW") else cv2.CAP_ANY
-        self._cap = cv2.VideoCapture(self.device_index, backend)
+        # Fast-path: try pre-detected or configured device index immediately
+        cap = cv2.VideoCapture(self.device_index, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(self.device_index, cv2.CAP_MSMF)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(self.device_index)
 
-        if not self._cap.isOpened():
-            # Fallback to default backend if DSHOW fails
-            self._cap = cv2.VideoCapture(self.device_index)
+        opened = False
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            ret, test_frame = cap.read()
+            if ret and test_frame is not None:
+                self._cap = cap
+                opened = True
 
-        if not self._cap.isOpened():
+        # Fallback to index probing only if initial direct attempt failed
+        if not opened:
+            backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+            for idx in [0, 1]:
+                if idx == self.device_index:
+                    continue
+                for backend in backends:
+                    cap = cv2.VideoCapture(idx, backend)
+                    if cap.isOpened():
+                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+                        ret, test_frame = cap.read()
+                        if ret and test_frame is not None:
+                            self._cap = cap
+                            self.device_index = idx
+                            opened = True
+                            break
+                        cap.release()
+                if opened:
+                    break
+
+        if not opened or self._cap is None:
             raise RuntimeError(
-                f"Could not open webcam at device index {self.device_index}. "
-                "Check WEBCAM_DEVICE_INDEX in .env and verify no other app is using it."
+                f"Could not open Logitech webcam at device index {self.device_index}. "
+                "Verify the camera is plugged into USB and not opened by another application."
             )
-
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
 
         actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))

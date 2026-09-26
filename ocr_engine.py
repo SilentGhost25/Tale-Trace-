@@ -26,14 +26,51 @@ log = logging.getLogger("taletrace.ocr")
 
 OCR_SPACE_URL = "https://api.ocr.space/parse/image"
 
+import shutil
+import time
+
 # Configure Tesseract path
 _tesseract_cmd = settings.tesseract_cmd
-if os.path.exists(_tesseract_cmd):
-    import pytesseract
-    pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
-    log.info("Tesseract binary configured at: %s", _tesseract_cmd)
-else:
-    log.warning("Tesseract binary not found at %s; will attempt PATH or cloud fallback.", _tesseract_cmd)
+_tesseract_found = False
+
+_candidate_paths = [
+    _tesseract_cmd,
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
+]
+
+for p in _candidate_paths:
+    if p and os.path.exists(p):
+        try:
+            import pytesseract
+            pytesseract.pytesseract.tesseract_cmd = p
+            _tesseract_cmd = p
+            _tesseract_found = True
+            log.info("Tesseract binary configured at: %s", p)
+            break
+        except ImportError:
+            pass
+
+if not _tesseract_found:
+    which_path = shutil.which("tesseract")
+    if which_path:
+        try:
+            import pytesseract
+            pytesseract.pytesseract.tesseract_cmd = which_path
+            _tesseract_cmd = which_path
+            _tesseract_found = True
+            log.info("Tesseract binary found in PATH: %s", which_path)
+        except ImportError:
+            pass
+
+if not _tesseract_found:
+    log.warning(
+        "Tesseract OCR executable not detected locally. TaleTrace will rely on OCR_SPACE_API_KEY from .env "
+        "(or install Tesseract via 'winget install UB-Mannheim.TesseractOCR')."
+    )
+
+_last_tesseract_warn_time = 0.0
 
 
 @dataclass
@@ -82,6 +119,18 @@ def ocr_image(frame: np.ndarray, use_cloud: bool = True) -> OcrResult:
 
 def _ocr_tesseract(frame: np.ndarray) -> OcrResult:
     """Executes high-performance local Tesseract OCR with word bounding boxes."""
+    global _last_tesseract_warn_time
+
+    if not _tesseract_found:
+        now = time.time()
+        if now - _last_tesseract_warn_time > 30.0:
+            log.warning(
+                "Local Tesseract OCR executable not found on system. "
+                "To fix: Add OCR_SPACE_API_KEY to .env or run 'winget install UB-Mannheim.TesseractOCR'."
+            )
+            _last_tesseract_warn_time = now
+        return OcrResult(text="", words=[])
+
     try:
         import pytesseract
     except ImportError:
@@ -140,24 +189,37 @@ def _ocr_tesseract(frame: np.ndarray) -> OcrResult:
 
 
 def _ocr_space(frame: Union[np.ndarray, bytes]) -> OcrResult:
-    """Executes OCR.space Engine 2 cloud OCR (free tier)."""
-    try:
-        jpeg_bytes = _encode_jpeg(frame)
-        resp = requests.post(
-            OCR_SPACE_URL,
-            files={"file": ("frame.jpg", jpeg_bytes, "image/jpeg")},
-            data={
-                "apikey": settings.ocr_space_api_key,
-                "OCREngine": 2,
-                "isOverlayRequired": True,
-                "scale": True,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception as e:
-        log.error("OCR.space request failed: %s", e)
+    """Executes OCR.space Engine 2 cloud OCR (free tier) with timeout safeguards."""
+    jpeg_bytes = _encode_jpeg(frame)
+    payload = None
+
+    # Retry up to 2 times on transient network error (503/timeout)
+    for attempt in range(2):
+        try:
+            resp = requests.post(
+                OCR_SPACE_URL,
+                files={"file": ("frame.jpg", jpeg_bytes, "image/jpeg")},
+                data={
+                    "apikey": settings.ocr_space_api_key,
+                    "OCREngine": 2,
+                    "isOverlayRequired": True,
+                    "scale": True,
+                },
+                timeout=8,
+            )
+            if resp.status_code == 503 and attempt == 0:
+                time.sleep(1.0)
+                continue
+            resp.raise_for_status()
+            payload = resp.json()
+            break
+        except Exception as e:
+            if attempt == 1:
+                log.warning("OCR.space request attempt failed: %s", e)
+                return OcrResult(text="", words=[])
+            time.sleep(0.5)
+
+    if not payload:
         return OcrResult(text="", words=[])
 
     if payload.get("IsErroredOnProcessing"):

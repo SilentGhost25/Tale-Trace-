@@ -5,12 +5,16 @@ Groq-based text merging, and reading pointer calculation.
 Adapted from OCRandGESTURE for the Logitech C270 book-reading companion.
 """
 from difflib import SequenceMatcher
+import json
 import logging
 import os
 import sys
 from typing import Optional, List, Tuple
 
-from groq import Groq
+try:
+    from groq import Groq
+except ImportError:
+    Groq = None
 
 from config import settings
 
@@ -62,10 +66,11 @@ def merge_ocr_with_groq(current_merge_memory: str, new_ocr_text: str) -> str:
     if current_merge_memory:
         if clean_new in current_merge_memory:
             return current_merge_memory
-        # Quick token overlap check
-        mem_tokens = set(current_merge_memory.lower().split())
-        new_tokens = set(clean_new.lower().split())
-        if new_tokens and len(new_tokens.intersection(mem_tokens)) / len(new_tokens) > 0.95:
+        # Quick token overlap check (80% or greater overlap means page already indexed)
+        mem_tokens = set(w.strip(".,!?;:\"'()").lower() for w in current_merge_memory.split() if len(w) > 2)
+        new_tokens = set(w.strip(".,!?;:\"'()").lower() for w in clean_new.split() if len(w) > 2)
+        if new_tokens and len(new_tokens.intersection(mem_tokens)) / len(new_tokens) >= 0.80:
+            log.info("OCR capture matches existing page memory (>=80%% overlap); skipping duplicate merge.")
             return current_merge_memory
 
     user_prompt = f"""
@@ -88,7 +93,7 @@ Combined Cumulative Text (Seamlessly stitched with middle overlap deduplicated, 
                 {"role": "system", "content": SEPTOPUS_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            model=settings.groq_model,
+            model=settings.groq_fast_model,
             temperature=0.1,
         )
         res = completion.choices[0].message.content.strip()
@@ -112,6 +117,28 @@ class TaleTraceMemoryManager:
         self.permanent_memory: List[str] = []  # Archived completed pages
         self.current_reading_pointer = 0
         self.current_word_index = 0
+        self._history_file = os.path.join(os.path.dirname(__file__), "..", "reading_history.json")
+        self._load_permanent_memory()
+
+    def _load_permanent_memory(self):
+        try:
+            if os.path.exists(self._history_file):
+                with open(self._history_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self.permanent_memory = data
+                    elif isinstance(data, dict):
+                        self.permanent_memory = data.get("archived_pages", [])
+                log.info("Loaded %d archived pages from reading_history.json", len(self.permanent_memory))
+        except Exception as e:
+            log.warning("Could not load reading_history.json: %s", e)
+
+    def _save_permanent_memory(self):
+        try:
+            with open(self._history_file, "w", encoding="utf-8") as f:
+                json.dump({"archived_pages": self.permanent_memory}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log.warning("Could not save reading_history.json: %s", e)
 
     def check_same_page_via_groq(self, active_mem: str, raw_ocr: str) -> bool:
         """Determines whether the raw OCR frame belongs to the current page by checking overlap."""
@@ -191,6 +218,7 @@ Answer with strictly ONE word: YES or NO."""
     def commit_to_permanent_memory(self):
         if self.merge_memory.strip():
             self.permanent_memory.append(self.merge_memory)
+            self._save_permanent_memory()
             log.info("Committed page to permanent memory. Total pages: %d", len(self.permanent_memory))
         self.merge_memory = ""
 

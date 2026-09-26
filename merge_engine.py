@@ -173,3 +173,48 @@ def get_pointer_map() -> Dict:
         except Exception:
             pass
     return {"words": []}
+
+
+def get_memory_text_up_to(word_index: int, include_prior_sessions: bool = True) -> str:
+    """
+    Returns all read text strictly up to and including word_index (no forward spoilers),
+    joining prior session pages and the current page slice.
+    """
+    prior_slices: List[str] = []
+    if include_prior_sessions and hasattr(pipeline, "permanent_memory"):
+        for page in pipeline.permanent_memory:
+            if page and page.strip():
+                prior_slices.append(page.strip())
+
+    current_page_text = get_memory_text().strip()
+    current_slice = ""
+    if current_page_text:
+        words = build_word_pointer_map(current_page_text)
+        if words and word_index >= 0:
+            if word_index < len(words):
+                end_char = words[word_index]["end"]
+                current_slice = current_page_text[:end_char].strip()
+            else:
+                current_slice = current_page_text
+        else:
+            current_slice = current_page_text
+
+    if current_slice:
+        prior_slices.append(current_slice)
+
+    return "\n\n".join(prior_slices).strip()
+
+
+def recap_up_to(word_index: int, max_lines: int = 5, include_prior_sessions: bool = True) -> str:
+    """
+    Collects past read text strictly up to current word_index (no forward spoilers),
+    optionally including archived pages from prior sessions, and returns a 4-5 line recap.
+    """
+    from ai_engine import generate_recap
+
+    combined_text = get_memory_text_up_to(word_index, include_prior_sessions=include_prior_sessions)
+    if not combined_text:
+        return "No text has been read so far to recap."
+
+    return generate_recap(combined_text, max_lines=max_lines)
+

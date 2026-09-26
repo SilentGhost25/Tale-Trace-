@@ -100,6 +100,9 @@ def test_state_machine_modes():
 
 
 def test_python_code_generation_and_pointer_stability():
+    from ocr_memory import pipeline
+    pipeline.merge_memory = ""
+    pipeline.permanent_memory = []
     text = "Rot8 swam through the high seas with Tumboo."
     pmap = merge_engine.update_memory_and_pointer_map(text, current_speaking_word_index=3)
 

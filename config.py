@@ -35,7 +35,7 @@ class Settings:
     groq_key_ai: str = _get("GROQ_API_KEY_2") or _get("GROQ_API_KEY")
     groq_key_learning: str = _get("GROQ_API_KEY_3") or _get("GROQ_API_KEY")
 
-    groq_model: str = _get("GROQ_MODEL", "openai/gpt-oss-120b")
+    groq_model: str = _get("GROQ_MODEL", "openai/gpt-oss-20b")
     groq_fast_model: str = _get("GROQ_FAST_MODEL", "openai/gpt-oss-20b")
 
     freesound_api_key: str = _get("FREESOUND_API_KEY")

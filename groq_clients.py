@@ -21,9 +21,21 @@ class GroqError(Exception):
     pass
 
 
+def _get_candidate_keys(primary_key: str) -> list[str]:
+    """Returns candidate API keys starting with the primary subsystem key."""
+    candidates = []
+    if primary_key:
+        candidates.append(primary_key)
+    for k in [settings.groq_api_key, settings.groq_key_ai, settings.groq_key_merge, settings.groq_key_learning]:
+        if k and k not in candidates:
+            candidates.append(k)
+    return candidates
+
+
 def _chat(api_key: str, model: str, system: str, user: str,
           json_mode: bool = False, temperature: float = 0.2) -> str:
-    if not api_key:
+    candidate_keys = _get_candidate_keys(api_key)
+    if not candidate_keys:
         raise GroqError("No Groq API key configured for this subsystem.")
 
     body = {
@@ -37,23 +49,29 @@ def _chat(api_key: str, model: str, system: str, user: str,
     if json_mode:
         body["response_format"] = {"type": "json_object"}
 
-    try:
-        resp = requests.post(
-            GROQ_URL,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type": "application/json"},
-            data=json.dumps(body),
-            timeout=20,
-        )
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        raise GroqError(f"Groq request failed: {e}") from e
+    last_err = None
+    for attempt, key in enumerate(candidate_keys):
+        try:
+            resp = requests.post(
+                GROQ_URL,
+                headers={"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"},
+                data=json.dumps(body),
+                timeout=15,
+            )
+            if resp.status_code == 429:
+                log.warning("Groq key #%d hit rate limit (429). Rotating to next available key...", attempt + 1)
+                last_err = GroqError(f"Groq 429 Rate Limit: {resp.text}")
+                continue
 
-    data = resp.json()
-    try:
-        return data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError) as e:
-        raise GroqError(f"Unexpected Groq response shape: {data}") from e
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+        except requests.RequestException as e:
+            last_err = e
+            log.warning("Groq request failed on key #%d: %s. Rotating to next key...", attempt + 1, e)
+
+    raise GroqError(f"All available Groq API keys exhausted: {last_err}")
 
 
 def call_merge_engine(system: str, user: str, json_mode: bool = False,

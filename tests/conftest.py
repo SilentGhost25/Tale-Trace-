@@ -15,3 +15,26 @@ sys.modules["gesture_engine"] = gesture
 sys.modules["gesture_engine.models"] = gesture.models
 sys.modules["gesture_engine.word_selector"] = gesture.word_selector
 sys.modules["gesture_engine.finger_detector"] = gesture.finger_detector
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def reset_memory_state():
+    try:
+        from ocr_memory import pipeline
+        pipeline.merge_memory = ""
+        pipeline.permanent_memory = []
+        pipeline.current_reading_pointer = 0
+        pipeline.current_word_index = 0
+    except Exception:
+        pass
+    yield
+    try:
+        from ocr_memory import pipeline
+        pipeline.merge_memory = ""
+        pipeline.permanent_memory = []
+        pipeline.current_reading_pointer = 0
+        pipeline.current_word_index = 0
+    except Exception:
+        pass
+

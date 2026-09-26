@@ -34,7 +34,11 @@ class ButtonState:
     momentary: bool = False
     toggle: bool = False
     both: bool = False
+    intend: bool = False
+    intend_pressed: bool = False
+    intend_released: bool = False
     connected: bool = False
+    mode: str = ""
 
 
 def _get_serial_connection():
@@ -61,7 +65,13 @@ def _get_serial_connection():
             return None
 
         try:
-            conn = serial.Serial(port_to_try, baudrate=settings.esp32_baud_rate, timeout=0.1)
+            conn = serial.Serial()
+            conn.port = port_to_try
+            conn.baudrate = settings.esp32_baud_rate
+            conn.timeout = 0.05
+            conn.dtr = False
+            conn.rts = False
+            conn.open()
             _serial_conn = conn
             log.info("Connected to ESP32 on Serial Port: %s", port_to_try)
             return _serial_conn
@@ -80,21 +90,103 @@ def get_button_state(timeout: float = 0.3) -> ButtonState:
     if conn is not None:
         try:
             with _serial_lock:
-                # Send poll command if needed or read last available line
-                while conn.in_waiting > 0:
-                    line = conn.readline().decode("utf-8", errors="ignore").strip()
-                    if line.startswith("{") and line.endswith("}"):
-                        data = json.loads(line)
-                        m = bool(data.get("btn_momentary", False))
-                        t = bool(data.get("btn_toggle", False))
-                        both = m and t
-                        state = ButtonState(momentary=m, toggle=t, both=both, connected=True)
-                        _last_button_state = state
-                        return state
-            if _last_button_state is not None:
-                return _last_button_state
+                found_state = None
+                saw_pressed = False
+                saw_released = False
+                lines_read = 0
+
+                # Limit max lines per poll iteration to prevent infinite loop on buffer backlog
+                while conn.in_waiting > 0 and lines_read < 25:
+                    lines_read += 1
+                    try:
+                        line = conn.readline().decode("utf-8", errors="ignore").strip()
+                    except Exception:
+                        break
+                    if "INTENT PRESSED" in line:
+                        saw_pressed = True
+                    elif "INTENT RELEASED" in line:
+                        saw_released = True
+                    elif line.startswith("{") and line.endswith("}"):
+                        try:
+                            data = json.loads(line)
+                            m = bool(data.get("btn_momentary", False))
+                            t = bool(data.get("btn_toggle", False))
+                            both = bool(data.get("both_active", m and t))
+                            i = bool(data.get("intend", False))
+                            if bool(data.get("intend_pressed", False)):
+                                saw_pressed = True
+                            if bool(data.get("intend_released", False)):
+                                saw_released = True
+                            mode_str = str(data.get("mode", ""))
+                            found_state = ButtonState(
+                                momentary=m,
+                                toggle=t,
+                                both=both,
+                                intend=i or saw_pressed,
+                                intend_pressed=saw_pressed,
+                                intend_released=saw_released,
+                                connected=True,
+                                mode=mode_str,
+                            )
+                        except json.JSONDecodeError:
+                            pass
+
+                # If buffer accumulation was large (>20 lines), clear old overflow
+                if conn.in_waiting > 30:
+                    try:
+                        conn.reset_input_buffer()
+                    except Exception:
+                        pass
+
+                if saw_pressed and (found_state is None or not found_state.intend_pressed):
+                    base_m = found_state.momentary if found_state else (_last_button_state.momentary if _last_button_state else False)
+                    base_t = found_state.toggle if found_state else (_last_button_state.toggle if _last_button_state else False)
+                    base_both = base_m and base_t
+                    found_state = ButtonState(
+                        momentary=base_m,
+                        toggle=base_t,
+                        both=base_both,
+                        intend=True,
+                        intend_pressed=True,
+                        intend_released=False,
+                        connected=True,
+                    )
+
+                if found_state is not None:
+                    # Save steady state with edges cleared for subsequent polls
+                    _last_button_state = ButtonState(
+                        momentary=found_state.momentary,
+                        toggle=found_state.toggle,
+                        both=found_state.both,
+                        intend=found_state.intend,
+                        intend_pressed=False,
+                        intend_released=False,
+                        connected=True,
+                        mode=found_state.mode,
+                    )
+                    return found_state
         except Exception as e:
-            log.debug("Serial read error: %s", e)
+            log.debug("Serial port error during button poll: %s", e)
+            # Reset connection on serial communication failure so next loop attempts clean reconnect
+            with _serial_lock:
+                try:
+                    if _serial_conn:
+                        _serial_conn.close()
+                except Exception:
+                    pass
+                _serial_conn = None
+
+    if _last_button_state is not None:
+        return ButtonState(
+            momentary=_last_button_state.momentary,
+            toggle=_last_button_state.toggle,
+            both=_last_button_state.both,
+            intend=_last_button_state.intend,
+            intend_pressed=False,
+            intend_released=False,
+            connected=_last_button_state.connected,
+            mode=_last_button_state.mode,
+        )
 
     # 2. Fallback to HTTP poll
     if settings.esp32_buttons_url:
@@ -105,7 +197,20 @@ def get_button_state(timeout: float = 0.3) -> ButtonState:
                 m = bool(data.get("btn_momentary", False))
                 t = bool(data.get("btn_toggle", False))
                 both = bool(data.get("both_active", m and t))
-                state = ButtonState(momentary=m, toggle=t, both=both, connected=True)
+                i = bool(data.get("intend", False))
+                i_pressed = bool(data.get("intend_pressed", False))
+                i_released = bool(data.get("intend_released", False))
+                mode_str = str(data.get("mode", ""))
+                state = ButtonState(
+                    momentary=m,
+                    toggle=t,
+                    both=both,
+                    intend=i,
+                    intend_pressed=i_pressed,
+                    intend_released=i_released,
+                    connected=True,
+                    mode=mode_str,
+                )
                 _last_button_state = state
                 return state
         except Exception:
@@ -119,13 +224,30 @@ def send_display_text(text: str, timeout: float = 1.5) -> bool:
     if not text:
         return False
 
+    # Normalize unicode punctuation and smart quotes to standard ASCII for U8g2
+    clean_text = (
+        text.replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+        .replace("—", "-")
+        .replace("–", "-")
+        .replace("…", "...")
+    )
+    # Strip non-ASCII characters (emojis, accents) so U8g2 font renders cleanly without garbled glyphs
+    clean_text = clean_text.encode("ascii", errors="ignore").decode("ascii")
+    # Flatten newlines so the serial DISPLAY:<text>\n protocol remains atomic
+    clean_text = " ".join(clean_text.replace("\r", " ").replace("\n", " ").split())
+
     # 1. Attempt Serial UART transmission
     conn = _get_serial_connection()
     if conn is not None:
         try:
             with _serial_lock:
-                payload = f"DISPLAY:{text}\n".encode("utf-8")
+                payload = f"DISPLAY:{clean_text}\n".encode("utf-8")
                 conn.write(payload)
+                conn.flush()
+                log.info("OLED display updated via Serial: %s", clean_text[:40])
                 return True
         except Exception as e:
             log.debug("Serial write error: %s", e)
@@ -135,7 +257,7 @@ def send_display_text(text: str, timeout: float = 1.5) -> bool:
         try:
             resp = requests.post(
                 settings.esp32_display_url,
-                data=text.encode("utf-8"),
+                data=clean_text.encode("utf-8"),
                 headers={"Content-Type": "text/plain"},
                 timeout=timeout,
             )

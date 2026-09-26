@@ -19,6 +19,15 @@ class Mode(Enum):
 
 
 def determine_mode(state: ButtonState) -> Mode:
+    if state.mode == "SCROLL_MODE":
+        return Mode.SCROLL_MODE
+    if state.mode == "MEANING_MODE":
+        return Mode.MEANING_MODE
+    if state.mode == "UPDATE_POSITION":
+        return Mode.UPDATE_POSITION
+    if state.mode == "IDLE_READING":
+        return Mode.IDLE_READING
+
     if state.toggle and state.momentary:
         return Mode.SCROLL_MODE
     if state.toggle:
