@@ -90,6 +90,13 @@ def get_button_state(timeout: float = 0.3) -> ButtonState:
     if conn is not None:
         try:
             with _serial_lock:
+                # Active poll request: send POLL command so ESP32 responds immediately
+                try:
+                    conn.write(b"POLL\n")
+                    conn.flush()
+                except Exception:
+                    pass
+
                 found_state = None
                 saw_pressed = False
                 saw_released = False
@@ -236,8 +243,8 @@ def send_display_text(text: str, timeout: float = 1.5) -> bool:
     )
     # Strip non-ASCII characters (emojis, accents) so U8g2 font renders cleanly without garbled glyphs
     clean_text = clean_text.encode("ascii", errors="ignore").decode("ascii")
-    # Flatten newlines so the serial DISPLAY:<text>\n protocol remains atomic
-    clean_text = " ".join(clean_text.replace("\r", " ").replace("\n", " ").split())
+    # Preserve newlines by escaping them as \n for serial transfer
+    clean_text = clean_text.replace("\r", "").replace("\n", "\\n")
 
     # 1. Attempt Serial UART transmission
     conn = _get_serial_connection()

@@ -48,7 +48,7 @@ The hardware rig is powered by an ESP32 DevKit V1 microcontroller, providing low
 | :--- | :--- | :--- | :--- |
 | **GPIO 4** | Momentary Push Button | Input (`INPUT_PULLUP`, Active LOW) | Button 1: Reading Position Jump Trigger |
 | **GPIO 5** | SPST Toggle Switch | Input (`INPUT_PULLUP`, Active LOW) | Button 2: Meaning Mode Toggle |
-| **GPIO 23** | Intent Push Button | Input (`INPUT_PULLUP`, Active LOW) | Intent Mode: Tap-to-Recap / Tap-to-Stop |
+| **GPIO 23** | Intent SPST Toggle Switch | Input (`INPUT_PULLUP`, Active LOW) | Intent Mode: Toggle ON for Spoken Context / Toggle OFF to Exit |
 | **GPIO 21** | SH1106 OLED SDA | I2C Data Line (Hardware Wire) | Display text & status to reader |
 | **GPIO 22** | SH1106 OLED SCL | I2C Clock Line (Hardware Wire) | Hardware I2C Clock Sync |
 | **5V / GND** | Power Supply | USB 5V Bus | Power microcontroller & OLED display |

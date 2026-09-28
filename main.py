@@ -113,29 +113,22 @@ def _bg_idle_ocr(webcam: WebcamStream) -> None:
 
 
 def _bg_meaning_lookup(webcam: WebcamStream) -> None:
-    """Background: finger check → OCR → word match → Groq meaning → OLED + conditional TTS (Rule 1)."""
+    """Background: OCR → word match → Groq meaning → OLED + conditional TTS (Rule 1)."""
     global _last_meaning_word, _last_meaning_time, _tts_trigger, _last_looked_up_meaning
     try:
         now = time.time()
-        if now - _last_meaning_time < MEANING_DEBOUNCE:
+        if now - _last_meaning_time < 1.0:  # Reduced cooldown to 1.0s for responsive feedback
             return
 
-        log.info("[MEANING] Background task fired - checking for finger pointing...")
+        log.info("[MEANING] Background task fired - capturing frame for finger & word selection...")
 
         frame = webcam.get_latest_frame()
         if frame is None:
             log.warning("[MEANING] Could not retrieve frame from webcam.")
             return
 
-        # ── Fast local finger check FIRST (~50 ms, no network) ──
-        if not quick_finger_check(frame):
-            log.debug("[MEANING] No finger detected on page.")
-            return  # No finger visible → skip expensive OCR call entirely
-
-        log.info("[MEANING] Finger detected! Running OCR & word selection...")
-        # Finger detected → now do OCR + word selection
         ocr_result = ocr_image(frame)
-        if not ocr_result.words:
+        if not ocr_result or not ocr_result.words:
             log.warning("[MEANING] OCR produced no words from frame.")
             return
 
@@ -200,18 +193,14 @@ def _bg_meaning_lookup(webcam: WebcamStream) -> None:
 
 
 def _bg_update_position(webcam: WebcamStream) -> None:
-    """Background: finger check (local, fast) → OCR → word match → jump TTS position."""
+    """Background: OCR → word match → jump TTS position."""
     try:
         frame = webcam.get_latest_frame()
         if frame is None:
             return
 
-        # ── Fast local finger check FIRST (~50 ms, no network) ──
-        if not quick_finger_check(frame):
-            return  # No finger visible → skip expensive OCR call entirely
-
         ocr_result = ocr_image(frame)
-        if not ocr_result.words:
+        if not ocr_result or not ocr_result.words:
             return
 
         pointed = find_pointed_word(frame, ocr_result)
@@ -233,10 +222,6 @@ def _bg_intent_context(webcam: WebcamStream) -> None:
     try:
         frame = webcam.get_latest_frame()
         if frame is None:
-            return
-
-        # Quick gate: is a finger even visible?
-        if not quick_finger_check(frame):
             return
 
         ocr_result = ocr_image(frame)
@@ -288,14 +273,16 @@ def main() -> None:
     print("🔘 Both Buttons ON     : Scroll Meaning Text on OLED")
     print("=" * 65 + "\n")
 
-    # Pre-load reading state / pointer map immediately on boot so TTS can speak without waiting for OCR
+    # Pre-load reading state / pointer map immediately on boot quietly
     existing_map = get_pointer_map()
     if existing_map and existing_map.get("words"):
         tts.load_pointer_map(existing_map)
         log.info("Pre-loaded %d words from reading memory into TTS engine.", len(existing_map["words"]))
-        send_display_text(f"Septopus: Ready\n({len(existing_map['words'])} words loaded)")
+        send_display_text(f"TaleTrace Ready!\n({len(existing_map['words'])} words loaded)")
     else:
         send_display_text("TaleTrace Ready!\nPoint at book")
+
+    tts.pause()  # Ensure quiet startup — no auto-reading or summary playback on boot
 
     webcam = WebcamStream()
     try:
@@ -319,23 +306,24 @@ def main() -> None:
                 tts.stop_immediately()
                 _tts_trigger = None
 
-            # --- INTENT MODE: tap to enter / tap to exit ---
-            if button_state.intend_pressed:
-                if _intent_recap_active:
-                    tts.stop_immediately()
-                    _intent_recap_active = False
-                    _tts_trigger = None
-                    _last_intent_word = None
-                    log.info("Intent mode exited.")
-                    send_display_text("Intent mode off.")
-                else:
-                    tts.stop_immediately()
-                    tts.pause()
-                    _intent_recap_active = True
-                    _tts_trigger = "INTENT"
-                    _last_intent_word = None
-                    log.info("Intent mode ON — point at a word.")
-                    send_display_text("Point at a word...")
+            # --- INTENT MODE: physical toggle switch (ON / OFF) ---
+            intent_active_signal = button_state.intend or button_state.intend_pressed
+            if intent_active_signal and not _intent_recap_active:
+                tts.stop_immediately()
+                tts.pause()
+                _intent_recap_active = True
+                _tts_trigger = "INTENT"
+                _last_intent_word = None
+                log.info("Intent mode ON (Toggle ON) — point at a word.")
+                send_display_text("Intent mode ON\nPoint at a word...")
+
+            elif not intent_active_signal and _intent_recap_active:
+                tts.stop_immediately()
+                _intent_recap_active = False
+                _tts_trigger = None
+                _last_intent_word = None
+                log.info("Intent mode OFF (Toggle OFF).")
+                send_display_text("Intent mode off.")
 
             # --- While INTENT MODE is on, run the fingertip → context pipeline ---
             if _intent_recap_active:
@@ -357,7 +345,7 @@ def main() -> None:
                 elif mode == Mode.UPDATE_POSITION:
                     send_display_text("Position Mode:\nPoint to jump...")
                 elif mode == Mode.IDLE_READING and not _intent_recap_active:
-                    send_display_text(f"Reading...\nWord #{tts.current_word_index}: {tts.current_word}")
+                    send_display_text("TaleTrace Ready!\nPoint at book")
 
                 if tts_should_be_paused(mode):
                     tts.pause()
@@ -366,7 +354,6 @@ def main() -> None:
 
             # --- Submit work to background thread (non-blocking) ---
             if mode == Mode.IDLE_READING:
-                # Resume reading TTS only when not playing recap/meaning announcement
                 if not _intent_recap_active and _tts_trigger is None and tts.is_paused:
                     tts.resume()
                 # Submit OCR pipeline only when interval elapsed & no task running

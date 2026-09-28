@@ -5,3 +5,7 @@ __pycache__/
 reading_memory.json
 pointer_map.json
 *.log
+*.jpg
+*.mp3
+reading_history.json
+serial_peek.py

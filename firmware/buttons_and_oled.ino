@@ -294,7 +294,9 @@ void handleSerial() {
     cmd.trim();
 
     if (cmd.startsWith("DISPLAY:")) {
-      updateOLED(cmd.substring(8));
+      String msg = cmd.substring(8);
+      msg.replace("\\n", "\n");
+      updateOLED(msg);
       Serial.println("OK:DISPLAY_UPDATED");
     } else if (cmd == "POLL") {
       Serial.println(getButtonJson(true));
@@ -377,8 +379,8 @@ void setup() {
   Serial.printf("Connecting to WiFi \"%s\"", WIFI_SSID);
 
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(500);
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 1000) {
+    delay(200);
     Serial.print(".");
   }
   Serial.println();
